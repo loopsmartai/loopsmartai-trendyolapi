@@ -1,0 +1,307 @@
+const axios = require('axios');
+const fs = require('fs');
+const express = require('express');
+const bodyParser = require('body-parser');
+
+// ------------------------
+// Configuration Constants
+// ------------------------
+
+const TRENDYOL_CLIENT_ID = '139435';
+const TRENDYOL_API_KEY = 'Rf745LqtpbDuHG0yhQy2';
+const TRENDYOL_API_SECRET = 'tnE2VFZYlN4soDrE1LeJ';
+const TRENDYOL_TOKEN = 'UmY3NDVMcXRwYkR1SEcweWhReTI6dG5FMlZGWllsTjRzb0RyRTFMZUo=';
+const SELLER_ID = TRENDYOL_CLIENT_ID;
+
+const GET_QUESTIONS_URL = `https://apigw.trendyol.com/integration/qna/sellers/${SELLER_ID}/questions/filter?status=WAITING_FOR_ANSWER`;
+const ANSWER_QUESTION_URL = (questionId) =>
+  `https://apigw.trendyol.com/integration/qna/sellers/${SELLER_ID}/questions/${questionId}/answers`;
+
+const CHATBASE_AGENT_ID = 'uH1DMfYSGraodngeAi0-T';
+const CHATBASE_API_KEY = 'b2e76c47-32d0-4098-835a-90c9d9fd615a';
+const CHATBASE_URL = 'https://api.chatbase.co/message';
+
+const TARGET_PRODUCT_NAME = 'Your Product Name'; // Replace with your product name
+const DEFAULT_CHATBASE_RESPONSE = "Üzgünüm, bu konuda kesin bir bilgiye sahip değilim. Sorunuzu meslektaşıma ileteceğim, iş saatleri içinde size geri dönecekler";
+
+const PROCESSED_QUESTIONS_FILE = './processedQuestions.json';
+
+// ------------------------
+// Persistent Storage for Processed Questions
+// ------------------------
+
+let processedQuestions = new Set();
+
+function loadProcessedQuestions() {
+  try {
+    if (fs.existsSync(PROCESSED_QUESTIONS_FILE)) {
+      const data = fs.readFileSync(PROCESSED_QUESTIONS_FILE, 'utf8');
+      const arr = JSON.parse(data);
+      processedQuestions = new Set(arr);
+      console.log(`Loaded ${processedQuestions.size} processed question IDs.`);
+    }
+  } catch (e) {
+    console.error("Error loading processed questions:", e);
+    processedQuestions = new Set();
+  }
+}
+
+function saveProcessedQuestions() {
+  try {
+    fs.writeFileSync(PROCESSED_QUESTIONS_FILE, JSON.stringify(Array.from(processedQuestions)));
+  } catch (e) {
+    console.error("Error saving processed questions:", e);
+  }
+}
+
+// ------------------------
+// Rate Limiter and Request Queue
+// ------------------------
+
+class RateLimiter {
+  constructor(interval) {
+    this.queue = [];
+    this.interval = interval;
+    this.isProcessing = false;
+  }
+  enqueue(task) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ task, resolve, reject });
+      this.processQueue();
+    });
+  }
+  async processQueue() {
+    if (this.isProcessing) return;
+    this.isProcessing = true;
+    while (this.queue.length) {
+      const { task, resolve, reject } = this.queue.shift();
+      try {
+        const result = await task();
+        resolve(result);
+      } catch (err) {
+        reject(err);
+      }
+      // Wait for the specified interval between tasks
+      await new Promise(r => setTimeout(r, this.interval));
+    }
+    this.isProcessing = false;
+  }
+}
+
+const rateLimiter = new RateLimiter(1000); // 1 second interval between requests
+
+// ------------------------
+// Advanced Error Recovery Mechanism
+// ------------------------
+
+async function makeRequestWithRetry(config, retries = 3, delay = 1000) {
+  try {
+    return await axios(config);
+  } catch (error) {
+    if (retries > 0) {
+      console.warn(`Request failed, retrying in ${delay} ms... (${retries} retries left)`);
+      await new Promise(r => setTimeout(r, delay));
+      return makeRequestWithRetry(config, retries - 1, delay * 2);
+    } else {
+      console.error('Request failed after retries:', error.message);
+      throw error;
+    }
+  }
+}
+
+// ------------------------
+// Global Approval State
+// ------------------------
+
+let isApprovalPending = false;
+let pendingApproval = null;  // { question, chatbaseAnswer }
+let approvalResolve = null;  // Will be assigned when waiting for approval
+
+function waitForApproval() {
+  return new Promise((resolve) => {
+    approvalResolve = resolve;
+    isApprovalPending = true;
+    console.log("Awaiting manual approval. Visit the approval page to review the answer.");
+  });
+}
+
+// ------------------------
+// Express Web Server for Approval UI
+// ------------------------
+
+const app = express();
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// Serve a simple HTML form for approval when a pending answer is available
+app.get('/approval', (req, res) => {
+  if (!pendingApproval) {
+    res.send("<h3>No pending approval at the moment.</h3>");
+    return;
+  }
+  const { question, chatbaseAnswer } = pendingApproval;
+  res.send(`
+    <html>
+      <head>
+        <title>Approve Answer</title>
+      </head>
+      <body>
+        <h3>Pending Answer Approval</h3>
+        <p><strong>Question:</strong> ${question.text}</p>
+        <form method="POST" action="/approval">
+          <label for="answer">Edit Answer (if needed):</label><br>
+          <textarea name="answer" rows="6" cols="60">${chatbaseAnswer}</textarea><br><br>
+          <button type="submit" name="action" value="approve">Approve</button>
+          <button type="submit" name="action" value="reject">Reject</button>
+        </form>
+      </body>
+    </html>
+  `);
+});
+
+// Endpoint to handle the approval form submission
+app.post('/approval', (req, res) => {
+  const action = req.body.action;
+  const editedAnswer = req.body.answer;
+  if (approvalResolve) {
+    if (action === 'approve') {
+      console.log("Answer approved by user.");
+      approvalResolve({ approved: true, editedAnswer });
+    } else {
+      console.log("Answer rejected by user.");
+      approvalResolve({ approved: false });
+    }
+  }
+  // Clear the pending approval state
+  isApprovalPending = false;
+  pendingApproval = null;
+  res.send("<h3>Your response has been recorded. You can now close this window.</h3>");
+});
+
+// Start the Express server (Replit sets process.env.PORT)
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Approval UI is running on port ${PORT}. Visit https://<your-replit-url>:${PORT}/approval to review pending answers.`);
+});
+
+// ------------------------
+// Helper Functions for Chatbase & Trendyol Interaction
+// ------------------------
+
+async function getChatbaseAnswer(questionText) {
+  try {
+    const payload = {
+      agentId: CHATBASE_AGENT_ID,
+      apiKey: CHATBASE_API_KEY,
+      message: questionText
+    };
+    const response = await rateLimiter.enqueue(() =>
+      makeRequestWithRetry({
+        method: 'post',
+        url: CHATBASE_URL,
+        data: payload,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    );
+    // Assuming the response JSON contains the answer in response.data.response
+    return response.data.response;
+  } catch (error) {
+    console.error('Error calling Chatbase:', error.message);
+    return null;
+  }
+}
+
+async function postAnswerToTrendyol(questionId, answerText) {
+  try {
+    const payload = { text: answerText };
+    const response = await rateLimiter.enqueue(() =>
+      makeRequestWithRetry({
+        method: 'post',
+        url: ANSWER_QUESTION_URL(questionId),
+        data: payload,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${TRENDYOL_TOKEN}`
+        }
+      })
+    );
+    console.log(`Posted answer for question ID ${questionId}. Response status: ${response.status}`);
+  } catch (error) {
+    console.error(`Error posting answer for question ID ${questionId}:`, error.message);
+  }
+}
+
+// ------------------------
+// Main Processing Functions
+// ------------------------
+
+// Process a single question: send to Chatbase, wait for manual approval, then post if approved.
+async function processQuestion(question) {
+  if (processedQuestions.has(question.id)) {
+    return;
+  }
+  // Filter by product name (case-insensitive)
+  if (!question.productName || question.productName.toLowerCase() !== TARGET_PRODUCT_NAME.toLowerCase()) {
+    return;
+  }
+  console.log(`Processing question ID ${question.id}: ${question.text}`);
+  const chatbaseAnswer = await getChatbaseAnswer(question.text);
+  if (!chatbaseAnswer || chatbaseAnswer.trim() === '' || chatbaseAnswer.trim() === DEFAULT_CHATBASE_RESPONSE) {
+    console.log(`No valid answer for question ID ${question.id}. Skipping posting answer.`);
+    processedQuestions.add(question.id);
+    saveProcessedQuestions();
+    return;
+  }
+  // Set pending approval and wait for user input
+  pendingApproval = { question, chatbaseAnswer };
+  const approvalResult = await waitForApproval();
+  if (approvalResult.approved) {
+    await postAnswerToTrendyol(question.id, approvalResult.editedAnswer);
+  } else {
+    console.log(`User rejected the answer for question ID ${question.id}.`);
+  }
+  processedQuestions.add(question.id);
+  saveProcessedQuestions();
+}
+
+// Poll Trendyol for new questions continuously, but pause if an approval is pending
+async function pollQuestions() {
+  if (isApprovalPending) {
+    console.log("Approval pending. Pausing polling until approval is handled.");
+    return;
+  }
+  try {
+    console.log('Polling for new questions...');
+    const response = await rateLimiter.enqueue(() =>
+      makeRequestWithRetry({
+        method: 'get',
+        url: GET_QUESTIONS_URL,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${TRENDYOL_TOKEN}`
+        }
+      })
+    );
+    const questions = response.data.content;
+    if (questions && Array.isArray(questions)) {
+      for (const question of questions) {
+        if (question.status === 'WAITING_FOR_ANSWER') {
+          await processQuestion(question);
+          // After processing one question (pending approval), break out to pause further processing.
+          break;
+        }
+      }
+    } else {
+      console.log('No questions received in response.');
+    }
+  } catch (error) {
+    console.error('Error fetching questions from Trendyol:', error.message);
+  }
+}
+
+// ------------------------
+// Initialize and Start Polling
+// ------------------------
+
+loadProcessedQuestions();
+setInterval(pollQuestions, 30000); // Poll every 30 seconds
+pollQuestions();

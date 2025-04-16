@@ -1,0 +1,79 @@
+When you see “Waiting for Chatbase to generate an answer…” and nothing else happens, it usually indicates that the script is not actually receiving or processing the final text from Chatbase. Below are some of the most common causes and how to fix them:
+
+1. The Code Is Using the Wrong Response Property
+Issue: Chatbase’s latest docs say the response is returned in response.data.text, but older code may look for response.data.answer or response.data.response.
+Fix: Make sure you capture the chatbot’s reply from the correct property:
+
+js
+Copy
+// Instead of: const answer = response.data.response;
+const answer = response.data.text;
+2. “stream” Parameter or SSE Handling
+Issue: If you have stream: true in your request body, you must read the response as a stream (Server-Sent Events). If your code expects a single JSON response but the API is streaming partial chunks, it’ll never see the final text.
+Fix:
+
+Either set stream to false so Chatbase returns the entire response at once:
+json
+Copy
+{
+  "messages": [...],
+  "chatbotId": "...",
+  "stream": false
+}
+Or implement SSE handling if you really want the streamed output.
+3. Missing or Incorrect Chatbot ID
+Issue: Chatbase requires "chatbotId": "<Your Chatbot ID>" in the request body. If the ID is invalid or missing, Chatbase may not respond with an answer.
+Fix: Double-check the chatbotId is correct, exactly matching what you see in your Chatbase dashboard.
+
+4. Incorrect Authorization Header
+Issue: The current Chatbase API requires:
+
+http
+Copy
+Authorization: Bearer <Your-Secret-Key>
+If your secret key is incorrect or placed in the body instead of the header, Chatbase won’t provide a valid response.
+Fix: Confirm you have:
+
+js
+Copy
+headers: {
+  'Authorization': `Bearer ${CHATBASE_SECRET_KEY}`,
+  'Content-Type': 'application/json'
+}
+…and that <Your-Secret-Key> is correct.
+
+5. Role Mismatch in messages
+Issue: Chatbase expects an array of messages with each message containing a content and a role ("user" or "assistant"). If the roles are mixed up or missing, Chatbase might return an empty or partial response.
+Fix: Ensure your request body has the correct structure, for example:
+
+json
+Copy
+{
+  "messages": [
+    { "content": "Hello, how are you?", "role": "user" }
+  ],
+  "chatbotId": "your-bot-id",
+  "stream": false
+}
+6. No Actual Content from Chatbase
+Issue: If Chatbase can’t generate a reply (e.g., not enough context or an unsupported model), it might return an empty string or an error message your code isn’t logging.
+Fix: Add detailed logging around the response:
+
+js
+Copy
+console.log("Chatbase full response:", response.data);
+and verify response.data.text isn’t empty or null.
+
+7. The Script Is Stuck Waiting for a Promise
+Issue: If your code uses a promise-based flow (e.g., await getChatbaseAnswer()) but never resolves or rejects (perhaps due to an unhandled error), it will appear to hang on “Waiting for Chatbase…”
+Fix: Check that your error handling calls reject or throws an error. Also ensure you have return statements where necessary so the function can properly resolve.
+
+How to Diagnose Quickly
+Set stream: false in the request body to simplify the response flow.
+Log the entire response from Chatbase:
+js
+Copy
+console.log("Full Chatbase response:", response.data);
+Check your roles in the messages array, confirm chatbotId, and ensure the Authorization header is correct.
+Look for error messages in the response. Chatbase often returns a JSON error explaining what went wrong.
+By aligning your code with the latest Chatbase specs—correct endpoint, headers, request body, and response parsing—you should get a valid text value back instead of staying stuck on “Waiting for Chatbase to generate an answer…”.
