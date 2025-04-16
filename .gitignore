@@ -16,6 +16,8 @@
 # Mono auto generated files
 mono_crash.*
 
+.idea
+
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/
@@ -398,3 +400,8 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+/.idea/.gitignore
+/.idea/loopsmartai-trendyolapi.iml
+/.idea/modules.xml
+/.idea/vcs.xml
+.DS_Store
